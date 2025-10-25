@@ -38,7 +38,6 @@ export async function POST(req: Request) {
     const serpJson = await serpResp.json();
 
     const organic: SerpResult[] = serpJson.organic_results || [];
-    // Map to simple structure
     const sources = organic.map((r: any) => ({
       title: r.title || r.title_no_formatting || r.serpapi_link || "אין כותרת",
       snippet: r.snippet || r.snippet_highlighted || "",
@@ -46,20 +45,17 @@ export async function POST(req: Request) {
     }));
 
     // --- 2) Fetch MK list from OKnesset for mention identification ---
-    // We'll try oknesset members endpoint (format=json)
     let mkNames: string[] = [];
     try {
       const okResp = await fetch("https://oknesset.org/api/v2/members/?format=json");
       if (okResp.ok) {
         const okJson = await okResp.json();
         const objects = okJson.objects || [];
-        // The OKnesset member object may have fields like 'name' or 'name_he' depending on API.
         mkNames = objects
           .map((o: any) => (o.name ? o.name : o.full_name ? o.full_name : o.name_he ? o.name_he : null))
           .filter(Boolean)
           .map((n: string) => n.trim());
       } else {
-        // fallback: small static list (if oknesset fails) — you can extend
         mkNames = [];
       }
     } catch (e) {
@@ -67,9 +63,7 @@ export async function POST(req: Request) {
       mkNames = [];
     }
 
-    // Normalize helper
     const normalize = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
-
     const normalizedMkNames = mkNames.map((n) => ({ raw: n, norm: normalize(n) }));
 
     // --- 3) Count occurrences (mentions) of MK names in search titles+snippets ---
@@ -77,21 +71,17 @@ export async function POST(req: Request) {
     for (const src of sources) {
       const text = `${src.title || ""} ${src.snippet || ""}`.toLowerCase();
       for (const mk of normalizedMkNames) {
-        // simple substring match — you can enhance with better tokenization
         if (mk.norm && text.includes(mk.norm)) {
           countsMap[mk.raw] = (countsMap[mk.raw] || 0) + 1;
         }
       }
     }
 
-    // Convert to sorted array of {name, count}
     const stats = Object.keys(countsMap)
       .map((name) => ({ name, count: countsMap[name] }))
       .sort((a, b) => b.count - a.count);
 
-    // If stats empty, fallback: try to extract candidate names heuristically from titles (Hebrew capital letters)
     if (stats.length === 0 && sources.length > 0) {
-      // Quick heuristic: split titles into words and look for repeated words across results
       const freq: Record<string, number> = {};
       for (const s of sources) {
         const words = (`${s.title || ""} ${s.snippet || ""}`)
@@ -109,9 +99,7 @@ export async function POST(req: Request) {
         .sort((a, b) => b[1] - a[1])
         .slice(0, 10)
         .map(([word, c]) => ({ name: word, count: c }));
-      // add to stats if any
       if (heuristic.length > 0) {
-        // only include words that appear more than once
         const filtered = heuristic.filter((h) => h.count > 1);
         if (filtered.length > 0) {
           filtered.forEach((f) => (countsMap[f.name] = f.count));
@@ -123,7 +111,6 @@ export async function POST(req: Request) {
       .map((name) => ({ name, count: countsMap[name] }))
       .sort((a, b) => b.count - a.count);
 
-    // Build a concise context for the AI
     const topStatsText =
       finalStats.length > 0
         ? finalStats
@@ -149,13 +136,12 @@ ${topStatsText}
 ענה על השאלה בעברית בהתבסס על המידע למעלה — תקצר, תתייחס למקורות (ציין מהם שלושה מקורות מובילים), ואם יש חוסר ודאות אמור את זה במפורש.
       `;
 
-    // --- 4) Call OpenAI to generate the final answer ---
+    // --- 4) Call OpenAI with streaming ---
     const openaiKey = process.env.OPENAI_API_KEY;
     if (!openaiKey) {
       return NextResponse.json({ error: "OPENAI_API_KEY not set in environment" }, { status: 500 });
     }
 
-    // Use the OpenAI Chat Completions API
     const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -163,29 +149,86 @@ ${topStatsText}
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini", // change model as you prefer
+        model: "gpt-4o-mini",
         messages: [
           { role: "system", content: "אתה עוזר AI דובר עברית שמסכם תוצאות חיפוש ומספק תשובות מבוססות מקור." },
           { role: "user", content: finalPrompt },
         ],
         temperature: 0.2,
         max_tokens: 800,
+        stream: true, // Enable streaming
       }),
     });
 
-    if (!openaiRes.ok) {
+    if (!openaiRes.ok || !openaiRes.body) {
       const txt = await openaiRes.text();
       console.error("OpenAI error:", txt);
       return NextResponse.json({ error: "OpenAI error", details: txt }, { status: 500 });
     }
-    const openaiJson = await openaiRes.json();
-    const answer = openaiJson.choices?.[0]?.message?.content || "אין תשובה מהמנוע.";
 
-    // Return JSON with answer, sources and stats (for frontend graph)
-    return NextResponse.json({
-      answer,
-      sources,
-      stats: finalStats,
+    // Create a ReadableStream to stream the response
+    const stream = new ReadableStream({
+      async start(controller) {
+        const reader = openaiRes.body!.getReader();
+        const decoder = new TextDecoder("utf-8");
+        let answer = "";
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+              // Send final data with sources and stats
+              controller.enqueue(
+                new TextEncoder().encode(
+                  JSON.stringify({
+                    answer,
+                    sources,
+                    stats: finalStats,
+                  }) + "\n"
+                )
+              );
+              controller.close();
+              break;
+            }
+
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split("\n");
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                const data = line.slice(6);
+                if (data === "[DONE]") continue;
+                try {
+                  const parsed = JSON.parse(data);
+                  const content = parsed.choices?.[0]?.delta?.content || "";
+                  if (content) {
+                    answer += content;
+                    controller.enqueue(
+                      new TextEncoder().encode(
+                        JSON.stringify({ answer: content }) + "\n"
+                      )
+                    );
+                  }
+                } catch (e) {
+                  console.error("Error parsing OpenAI chunk:", e);
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Stream error:", e);
+          controller.error(e);
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    });
+
+    return new NextResponse(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      },
     });
   } catch (error: any) {
     console.error("knesset-chat route error:", error);
