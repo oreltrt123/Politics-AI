@@ -88,7 +88,7 @@ export async function POST(req: NextRequest) {
                 controller.enqueue(encoder.encode(chunk.choices[0].delta.content))
               }
             } catch (chunkError) {
-              console.error("[v0] Stream chunk error:", chunkError)
+              console.error("Stream chunk error:", chunkError)
               controller.enqueue(encoder.encode("שגיאה בעיבוד התגובה מהמודל"))
               controller.close()
               return
@@ -97,7 +97,7 @@ export async function POST(req: NextRequest) {
 
           controller.close()
         } catch (error: any) {
-          console.error("[v0] Streaming error:", error.message)
+          console.error("Streaming error:", error.message)
           controller.enqueue(encoder.encode(`שגיאה: ${error.message}`))
           controller.close()
         }
@@ -111,7 +111,7 @@ export async function POST(req: NextRequest) {
       },
     })
   } catch (error: any) {
-    console.error("[v0] API error:", error)
+    console.error("API error:", error)
     return NextResponse.json({ error: `שגיאה פנימית בשרת: ${error.message}` }, { status: 500 })
   }
 }
