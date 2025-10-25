@@ -1,9 +1,11 @@
-// app/api/chats/route.ts
 import { db } from "@/config/db";
 import { chatTable, frameTable, projectTable } from "@/config/schema";
 import { currentUser } from "@clerk/nextjs/server";
 import { NextRequest, NextResponse } from "next/server";
 import { eq, and } from "drizzle-orm";
+
+// Force the route to be dynamic, preventing prerendering during build
+export const dynamic = 'force-dynamic';
 
 export async function PUT(req: NextRequest) {
   try {
