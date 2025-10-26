@@ -1,4 +1,4 @@
-import { integer, jsonb, pgTable, text, timestamp, varchar, serial, boolean, date, decimal } from "drizzle-orm/pg-core";
+import { pgTable, serial, integer, varchar, text, timestamp, jsonb, boolean, date, decimal } from "drizzle-orm/pg-core";
 import { relations } from "drizzle-orm";
 
 // ============================================
@@ -9,6 +9,7 @@ export const usersTable = pgTable("users", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   name: varchar("name", { length: 255 }).notNull(),
   email: varchar("email", { length: 255 }).notNull().unique(),
+  clerkId: varchar("clerk_id", { length: 255 }).notNull().unique(), // Explicit unique constraint
   credits: integer("credits").default(2),
 });
 
@@ -90,6 +91,31 @@ export const speechesTable = pgTable("speeches", {
 });
 
 // ============================================
+// NEW CHAT PROJECT TABLES
+// ============================================
+
+export const chatProjectsTable = pgTable("chat_projects", {
+  id: serial("id").primaryKey(),
+  projectId: varchar("project_id").notNull().unique(),
+  name: varchar("name", { length: 255 }).notNull().default("Knesset Chat"),
+  userId: varchar("user_id", { length: 255 }).notNull().references(() => usersTable.clerkId, { onDelete: "cascade" }), // Reference clerkId with cascade
+  visibility: varchar("visibility", { length: 50 }).notNull().default("private"),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const chatMessagesTable = pgTable("chat_messages", {
+  id: serial("id").primaryKey(),
+  chatProjectId: integer("chat_project_id").notNull().references(() => chatProjectsTable.id, { onDelete: "cascade" }),
+  role: varchar("role", { length: 50 }).notNull(),
+  content: text("content").notNull(),
+  sources: jsonb("sources"),
+  stats: jsonb("stats"),
+  images: jsonb("images"),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+// ============================================
 // RELATIONS
 // ============================================
 
@@ -128,5 +154,20 @@ export const speechesRelations = relations(speechesTable, ({ one }) => ({
   member: one(knessetMembersTable, {
     fields: [speechesTable.mkId],
     references: [knessetMembersTable.mkId],
+  }),
+}));
+
+export const chatProjectRelations = relations(chatProjectsTable, ({ one, many }) => ({
+  user: one(usersTable, {
+    fields: [chatProjectsTable.userId],
+    references: [usersTable.clerkId],
+  }),
+  messages: many(chatMessagesTable),
+}));
+
+export const chatMessageRelations = relations(chatMessagesTable, ({ one }) => ({
+  chatProject: one(chatProjectsTable, {
+    fields: [chatMessagesTable.chatProjectId],
+    references: [chatProjectsTable.id],
   }),
 }));

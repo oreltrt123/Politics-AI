@@ -5,12 +5,13 @@ type SerpResult = {
   title?: string;
   snippet?: string;
   link?: string;
+  images?: string[]; // New: for images
 };
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const messages = body.messages;
+    const { messages, model } = body;
     if (!messages || !Array.isArray(messages) || messages.length === 0) {
       return NextResponse.json({ error: "No messages provided" }, { status: 400 });
     }
@@ -20,7 +21,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid message" }, { status: 400 });
     }
 
-    // --- 1) Run web search with SerpAPI ---
+    // --- 1) Run web search with SerpAPI for main results ---
     const serpKey = process.env.SERPAPI_KEY;
     if (!serpKey) {
       return NextResponse.json({ error: "SERPAPI_KEY not set in environment" }, { status: 500 });
@@ -42,9 +43,19 @@ export async function POST(req: Request) {
       title: r.title || r.title_no_formatting || r.serpapi_link || "אין כותרת",
       snippet: r.snippet || r.snippet_highlighted || "",
       link: r.link || r.url || r.serpapi_link || "",
+      images: r.thumbnail ? [r.thumbnail] : [], // Use thumbnail if available
     }));
 
-    // --- 2) Fetch MK list from OKnesset for mention identification ---
+    // --- 2) Search for images using SerpAPI ---
+    const imageUrl = `https://serpapi.com/search.json?engine=google_images&q=${encodeURIComponent(lastUserMsg + ' images')}&num=10&api_key=${serpKey}`;
+    const imageResp = await fetch(imageUrl);
+    let images: string[] = [];
+    if (imageResp.ok) {
+      const imageJson = await imageResp.json();
+      images = imageJson.images_results?.map((img: any) => img.thumbnail || img.original) || [];
+    }
+
+    // --- 3) Fetch MK list from OKnesset (for politics focus) ---
     let mkNames: string[] = [];
     try {
       const okResp = await fetch("https://oknesset.org/api/v2/members/?format=json");
@@ -55,8 +66,6 @@ export async function POST(req: Request) {
           .map((o: any) => (o.name ? o.name : o.full_name ? o.full_name : o.name_he ? o.name_he : null))
           .filter(Boolean)
           .map((n: string) => n.trim());
-      } else {
-        mkNames = [];
       }
     } catch (e) {
       console.error("OKnesset fetch error:", e);
@@ -66,7 +75,7 @@ export async function POST(req: Request) {
     const normalize = (s: string) => s.replace(/\s+/g, " ").trim().toLowerCase();
     const normalizedMkNames = mkNames.map((n) => ({ raw: n, norm: normalize(n) }));
 
-    // --- 3) Count occurrences (mentions) of MK names in search titles+snippets ---
+    // --- 4) Count MK mentions ---
     const countsMap: Record<string, number> = {};
     for (const src of sources) {
       const text = `${src.title || ""} ${src.snippet || ""}`.toLowerCase();
@@ -125,110 +134,80 @@ export async function POST(req: Request) {
         : "לא נמצאו מקורות בחיפוש.";
 
     const finalPrompt = `
-המשתמש שואל: "${lastUserMsg}"
+אתה PoliticsAI, עוזר AI המתמחה בפוליטיקה ישראלית והכנסת. השאלה של המשתמש: "${lastUserMsg}"
 
-להלן עיבוד ראשוני של התוצאות שנמצאו בגוגל (באמצעות SerpAPI) ובהן מקורות:
+להלן תוצאות חיפוש מגוגל (SerpAPI):
 ${sourcesText}
 
-נתוני אזכורים מגובשים (מניתוח כותרות ותקצירים): 
+אזכורים של ח"כים:
 ${topStatsText}
 
-ענה על השאלה בעברית בהתבסס על המידע למעלה — תקצר, תתייחס למקורות (ציין מהם שלושה מקורות מובילים), ואם יש חוסר ודאות אמור את זה במפורש.
+ענה בעברית בצורה תמציתית, מקצועית וטבעית. התמקד בהיבטים פוליטיים אם רלוונטי. ציין 3 מקורות מובילים. אם חסר מידע, אמור זאת. התשובה צריכה להיות מלאה, ללא קטיעות.
       `;
 
-    // --- 4) Call OpenAI with streaming ---
-    const openaiKey = process.env.OPENAI_API_KEY;
-    if (!openaiKey) {
-      return NextResponse.json({ error: "OPENAI_API_KEY not set in environment" }, { status: 500 });
+    // --- 5) Call AI based on selected model ---
+    const selectedModel = model === "gemini" ? "gemini" : "gpt";
+    let apiUrl = "";
+    let headers: Record<string, string> = { "Content-Type": "application/json" };
+    let apiKey = "";
+
+    if (selectedModel === "gemini") {
+      apiKey = process.env.GEMINI_API_KEY || "";
+      apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+    } else {
+      apiKey = process.env.OPENAI_API_KEY || "";
+      apiUrl = "https://api.openai.com/v1/chat/completions";
+      headers["Authorization"] = `Bearer ${apiKey}`;
     }
 
-    const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${openaiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "אתה עוזר AI דובר עברית שמסכם תוצאות חיפוש ומספק תשובות מבוססות מקור." },
-          { role: "user", content: finalPrompt },
-        ],
-        temperature: 0.2,
-        max_tokens: 800,
-        stream: true, // Enable streaming
-      }),
-    });
-
-    if (!openaiRes.ok || !openaiRes.body) {
-      const txt = await openaiRes.text();
-      console.error("OpenAI error:", txt);
-      return NextResponse.json({ error: "OpenAI error", details: txt }, { status: 500 });
+    if (!apiKey) {
+      return NextResponse.json({ error: `${selectedModel.toUpperCase()}_API_KEY not set` }, { status: 500 });
     }
 
-    // Create a ReadableStream to stream the response
-    const stream = new ReadableStream({
-      async start(controller) {
-        const reader = openaiRes.body!.getReader();
-        const decoder = new TextDecoder("utf-8");
-        let answer = "";
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-              // Send final data with sources and stats
-              controller.enqueue(
-                new TextEncoder().encode(
-                  JSON.stringify({
-                    answer,
-                    sources,
-                    stats: finalStats,
-                  }) + "\n"
-                )
-              );
-              controller.close();
-              break;
-            }
-
-            const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split("\n");
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const data = line.slice(6);
-                if (data === "[DONE]") continue;
-                try {
-                  const parsed = JSON.parse(data);
-                  const content = parsed.choices?.[0]?.delta?.content || "";
-                  if (content) {
-                    answer += content;
-                    controller.enqueue(
-                      new TextEncoder().encode(
-                        JSON.stringify({ answer: content }) + "\n"
-                      )
-                    );
-                  }
-                } catch (e) {
-                  console.error("Error parsing OpenAI chunk:", e);
-                }
-              }
-            }
+    const requestBody =
+      selectedModel === "gemini"
+        ? {
+            contents: [{ parts: [{ text: finalPrompt }] }],
+            generationConfig: { temperature: 0.2, maxOutputTokens: 800 },
           }
-        } catch (e) {
-          console.error("Stream error:", e);
-          controller.error(e);
-        } finally {
-          reader.releaseLock();
-        }
-      },
+        : {
+            model: "gpt-4o-mini",
+            messages: [
+              { role: "system", content: "אתה PoliticsAI, עוזר AI דובר עברית שמתמחה בפוליטיקה ישראלית, מסכם תוצאות חיפוש ומספק תשובות מבוססות מקור." },
+              { role: "user", content: finalPrompt },
+            ],
+            temperature: 0.2,
+            max_tokens: 800,
+            stream: false, // Non-streaming for simplicity; adjust if needed
+          };
+
+    const aiRes = await fetch(apiUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
     });
 
-    return new NextResponse(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-      },
+    if (!aiRes.ok) {
+      const txt = await aiRes.text();
+      console.error(`${selectedModel} error:`, txt);
+      return NextResponse.json({ error: `${selectedModel} error`, details: txt }, { status: 500 });
+    }
+
+    let aiResponse;
+    if (selectedModel === "gemini") {
+      const aiJson = await aiRes.json();
+      aiResponse = aiJson.candidates?.[0]?.content?.parts?.[0]?.text || "לא התקבלה תשובה.";
+    } else {
+      const aiJson = await aiRes.json();
+      aiResponse = aiJson.choices?.[0]?.message?.content || "לא התקבלה תשובה.";
+    }
+
+    // --- 6) Return full response ---
+    return NextResponse.json({
+      answer: aiResponse,
+      sources,
+      stats: finalStats,
+      images,
     });
   } catch (error: any) {
     console.error("knesset-chat route error:", error);

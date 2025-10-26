@@ -32,8 +32,8 @@ export default function NavBar() {
   const [error, setError] = useState<string | null>(null)
 
   const menuItems = [
-    { name: "Pricing", href: "#pricing" },
-    { name: "Testimonials", href: "#testimonials" },
+    { name: "Chat", href: "/chat" },
+    { name: "Discover", href: "/discover" },
   ];
 
   return (
@@ -56,9 +56,7 @@ export default function NavBar() {
             </Button>
           </div>
           <div className="flex sm:hidden">
-            <Link href="/" className="font-light tracking-tighter text-lg">
-              Acme
-            </Link>
+            <Logo />
           </div>
           <div className="hidden sm:flex items-center space-x-8">
               <Logo />
@@ -207,7 +205,7 @@ export default function NavBar() {
                     </Link>
                   </motion.div>
                 ))}
-                <motion.div
+                {/* <motion.div
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ duration: 0.3, delay: 0.4 }}
@@ -234,7 +232,7 @@ export default function NavBar() {
                       />
                     </svg>
                   </Link>
-                </motion.div>
+                </motion.div> */}
               </motion.div>
             </motion.div>
           )}
